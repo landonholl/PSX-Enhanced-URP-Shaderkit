@@ -15,7 +15,7 @@ snapping, affine texture warping) directly in-shader.
 Drag the `PSXShaderKit` folder into your project's `Assets/` directory.
 
 ## Features
-- Vertex snapping (NDC-space, crack-free)
+- Vertex snapping
 - Affine texture warping
 - Ordered Bayer dithering + color quantization
 - Proximity dither fade
