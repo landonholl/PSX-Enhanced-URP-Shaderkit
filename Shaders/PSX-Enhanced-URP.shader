@@ -25,6 +25,9 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
         _PSXSpecColor   ("Specular Color",                  Color)      = (0.1,0.1,0.1,1)
         _PSXShininess   ("Shininess",                       Range(1,128))   = 16
 
+        [Header(Texture)]
+        [Toggle(_NO_MIPMAP)] _NoMipmap ("Disable Mipmapping (PSX-authentic)", Float) = 1
+
         [Header(PSX Visual Style)]
         _ObjectDithering    ("Per-Object Dithering",        Range(0,1)) = 1
         _ColorBits          ("Color Bits Per Channel (5=PSX 15-bit)", Range(1,8)) = 5
@@ -35,6 +38,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
         [Header(Lighting)]
         [Toggle(_PER_PIXEL_LIGHTS)] _PerPixelAdditionalLights ("Per-Pixel Point/Spot Lights", Float) = 1
         _LightQuantization ("Light Quantization Steps (0=smooth)", Float) = 0
+        _NormalSnapSteps   ("Normal Snap Steps (0=off, 2-8 typical)", Float) = 0
         [Toggle(_SUBDIVIDE)] _Subdivide ("Subdivide Triangles (Improves vertex lighting on large faces)", Float) = 0
 
         [Header(Vertex Snapping)]
@@ -42,7 +46,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
         _VertexSnapResolution           ("Resolution Override (0 = use global)", Float)     = 0
 
         [Header(Interaction)]
-        [Toggle] _IsLit ("Lit (uncheck = highlighted when looked at)", Float) = 1
+        [Toggle] _IsHighlighted ("Highlighted (check = permanently highlighted)", Float) = 0
         _HighlightColor ("Highlight Color (RGB) Strength (A)", Color) = (1,1,1,0.15)
 
         [Header(Proximity Fade)]
@@ -121,9 +125,17 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
             #pragma shader_feature_local _ALPHA_TEST
             // Per-material: proximity dither fade when close to camera
             #pragma shader_feature_local _PROXIMITY_FADE
+            #pragma shader_feature_local _NO_MIPMAP
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
+            #include "PSXSnap.hlsl"
+
+            #ifdef _NO_MIPMAP
+                #define PSX_SAMPLE(tex, samp, uv) SAMPLE_TEXTURE2D_LOD(tex, samp, uv, 0)
+            #else
+                #define PSX_SAMPLE(tex, samp, uv) SAMPLE_TEXTURE2D(tex, samp, uv)
+            #endif
 
             // ── Material constant buffer (required for SRP Batcher on non-geom passes) ──
             CBUFFER_START(UnityPerMaterial)
@@ -143,7 +155,8 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 float  _VertexSnapping;
                 float  _VertexSnapResolution;
                 float  _LightQuantization;
-                float  _IsLit;
+                float  _NormalSnapSteps;
+                float  _IsHighlighted;
                 half4  _HighlightColor;
                 float  _ProximityFadeStart;
                 float  _ProximityFadeEnd;
@@ -161,7 +174,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
             TEXTURECUBE(_Cubemap);      SAMPLER(sampler_Cubemap);
 
             // ── PSXShaderManager globals (set via Shader.SetGlobalFloat) ──────
-            float _PSX_GridSize;
+            // _PSX_GridSize is declared in PSXSnap.hlsl
             float _PSX_LightingNormalFactor;
             float _PSX_TextureWarpingFactor;
             float _PSX_TextureWarpingMode;
@@ -229,26 +242,6 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
             // PSX Utility Functions
             // ─────────────────────────────────────────────────────────────────
 
-            // Snap a clip-space position to the PSX resolution grid.
-            // Snapping is performed in NDC space (AFTER the perspective divide)
-            // so that vertices shared between adjacent triangles always round to
-            // the same screen-space grid point.  This matches the PS1 GTE
-            // hardware and is the only approach that prevents edge/vertex cracks.
-            //
-            // View-space or homogeneous-clip-space snapping both fail because the
-            // effective grid density changes with depth, so the same world vertex
-            // can round to different screen pixels depending on which triangle
-            // invokes the geometry shader — producing hairline seams.
-            float4 PSX_SnapClip(float4 clipPos, float gridSize)
-            {
-                if (gridSize < 0.00001f)
-                    return clipPos;
-                float2 ndc = clipPos.xy / clipPos.w;
-                ndc = floor(ndc * gridSize + 0.5f) / gridSize;
-                clipPos.xy = ndc * clipPos.w;
-                return clipPos;
-            }
-
             // Perspective-incorrect (affine) UV mapping — causes the characteristic
             // texture swimming of PS1 games.
             float4 PSX_AffineUV(float4 viewVertex, float2 uv)
@@ -315,6 +308,13 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
             half3 PSX_ShadeVertex(float3 worldPos, float3 worldNormal)
             {
                 half3 col = half3(unity_AmbientSky.rgb);
+
+                // Snap normal to a coarse grid before lighting.
+                // Collapses nearby normals (e.g. hard-edge seam vertices) to the
+                // same direction so they produce identical NdotL — eliminating
+                // the bright-edge artifact on split-normal hard-edged geometry.
+                if (_NormalSnapSteps >= 1.0f)
+                    worldNormal = normalize(floor(worldNormal * _NormalSnapSteps + 0.5f) / _NormalSnapSteps);
 
                 Light mainLight = GetMainLight();
                 float NdotL = max(0.0f, dot(worldNormal, mainLight.direction));
@@ -467,9 +467,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 o.worldPos    = v.worldPos;
                 o.worldNormal = v.worldNormal;
                 float4 clip   = mul(UNITY_MATRIX_P, v.viewPos);
-                o.vertex      = PSX_SnapClip(clip,
-                                    (_VertexSnapping < 0.5f) ? 0.0f :
-                                    ((_VertexSnapResolution > 0.0001f) ? _VertexSnapResolution : _PSX_GridSize));
+                o.vertex      = PSX_SnapClip(clip, PSX_ResolveSnapGrid(_VertexSnapping, _VertexSnapResolution));
                 o.fogFactor   = ComputeFogFactor(clip.z);
                 return o;
             }
@@ -566,8 +564,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 }
                 #endif
 
-                float snapGrid = (_VertexSnapping < 0.5f) ? 0.0f :
-                                 ((_VertexSnapResolution > 0.0001f) ? _VertexSnapResolution : _PSX_GridSize);
+                float snapGrid = PSX_ResolveSnapGrid(_VertexSnapping, _VertexSnapResolution);
                 for (int i = 0; i < 3; i++)
                 {
                     float4 clip    = mul(UNITY_MATRIX_P, IN[i].viewPos);
@@ -602,7 +599,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 float2 affineST  = i.affineUV.xy  / i.affineUV.z;
                 float2 affineST2 = i.affineUV2.xy / i.affineUV2.z;
 
-                half4 col = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, affineST) * _Color;
+                half4 col = PSX_SAMPLE(_MainTex, sampler_MainTex, affineST) * _Color;
 
                 // ── Alpha cutout ──────────────────────────────────────────────
                 #ifdef _ALPHA_TEST
@@ -617,18 +614,18 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 col.rgb *= totalLight;
 
                 // ── Interaction highlight ─────────────────────────────────────
-                // _IsLit = 0 when LookSpecularHighlighter is looking at this object.
+                // _IsHighlighted = 1 when LookSpecularHighlighter is looking at this object.
                 // Additively overlays _HighlightColor on top of normal shading —
                 // works regardless of texture, emission, or lighting state.
-                if (_IsLit < 0.5f)
+                if (_IsHighlighted > 0.5f)
                     col.rgb += _HighlightColor.rgb * _HighlightColor.a;
 
                 // ── Emission ─────────────────────────────────────────────────
-                half4 emissive = SAMPLE_TEXTURE2D(_EmissiveTex, sampler_EmissiveTex, affineST2);
+                half4 emissive = PSX_SAMPLE(_EmissiveTex, sampler_EmissiveTex, affineST2);
                 col.rgb += emissive.rgb * _EmissionColor.rgb * _EmissionColor.a;
 
                 // ── Cubemap env reflection (PS1-style environment mapping) ────
-                half reflMask = SAMPLE_TEXTURE2D(_ReflectionMap, sampler_ReflectionMap, affineST).r;
+                half reflMask = PSX_SAMPLE(_ReflectionMap, sampler_ReflectionMap, affineST).r;
                 col.rgb += SAMPLE_TEXTURECUBE(_Cubemap, sampler_Cubemap, i.reflDir).rgb
                          * _CubemapColor.rgb * _CubemapColor.a * reflMask;
 
@@ -714,7 +711,16 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 o.color = col;
 
                 #ifndef PSX_TRIANGLE_SORT_OFF
+                // Only use per-triangle center depth for transparent objects (painter's algorithm).
+                // Opaque objects must write hardware depth; the center-depth trick pushes triangle
+                // edges "behind" the actual surface, letting background geometry bleed through as
+                // a hairline seam that grows with distance (the farther the camera, the larger the
+                // screen-space gap between edge depth and triangle-center depth).
+                #ifdef _TRANSPARENT
                 o.depth = i.customDepth;
+                #else
+                o.depth = i.vertex.z;
+                #endif
                 return o;
                 #else
                 return o.color;
@@ -744,6 +750,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
+            #include "PSXSnap.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 float4 _MainTex_ST;
@@ -762,7 +769,8 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 float  _VertexSnapping;
                 float  _VertexSnapResolution;
                 float  _LightQuantization;
-                float  _IsLit;
+                float  _NormalSnapSteps;
+                float  _IsHighlighted;
                 half4  _HighlightColor;
                 float  _Alpha;
                 float  _Cutoff;
@@ -793,6 +801,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 #else
                 clip.z = max(clip.z, UNITY_NEAR_CLIP_VALUE * clip.w);
                 #endif
+                clip     = PSX_SnapClip(clip, PSX_ResolveSnapGrid(_VertexSnapping, _VertexSnapResolution));
                 o.vertex = clip;
                 o.uv     = TRANSFORM_TEX(uv, _MainTex);
                 return o;
@@ -838,6 +847,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
             #pragma shader_feature_local _ALPHA_TEST
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+            #include "PSXSnap.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 float4 _MainTex_ST;
@@ -856,7 +866,8 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 float  _VertexSnapping;
                 float  _VertexSnapResolution;
                 float  _LightQuantization;
-                float  _IsLit;
+                float  _NormalSnapSteps;
+                float  _IsHighlighted;
                 half4  _HighlightColor;
                 float  _Alpha;
                 float  _Cutoff;
@@ -867,7 +878,7 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
 
             TEXTURE2D(_MainTex); SAMPLER(sampler_MainTex);
 
-            float _PSX_GridSize;
+            // _PSX_GridSize is declared in PSXSnap.hlsl
             float _PSX_VertexWobbleMode;
 
             struct depth_v2g { float4 viewPos : TEXCOORD0; float2 uv : TEXCOORD1; };
@@ -886,18 +897,12 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
             [maxvertexcount(3)]
             void DepthGeom(triangle depth_v2g IN[3], inout TriangleStream<depth_g2f> stream)
             {
-                float snapGrid = (_VertexSnapping < 0.5f) ? 0.0f :
-                                 ((_VertexSnapResolution > 0.0001f) ? _VertexSnapResolution : _PSX_GridSize);
+                float snapGrid = PSX_ResolveSnapGrid(_VertexSnapping, _VertexSnapResolution);
                 for (int i = 0; i < 3; i++)
                 {
                     depth_g2f o;
                     float4 clipPos = mul(UNITY_MATRIX_P, IN[i].viewPos);
-                    if (snapGrid >= 0.00001f)
-                    {
-                        float2 ndc = clipPos.xy / clipPos.w;
-                        ndc = floor(ndc * snapGrid + 0.5f) / snapGrid;
-                        clipPos.xy = ndc * clipPos.w;
-                    }
+                    clipPos = PSX_SnapClip(clipPos, snapGrid);
                     o.vertex = clipPos;
                     o.uv     = IN[i].uv;
                     stream.Append(o);
