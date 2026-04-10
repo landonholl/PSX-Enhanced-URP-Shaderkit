@@ -714,7 +714,16 @@ Shader "PSX/Enhanced Vertex Lit (URP)"
                 o.color = col;
 
                 #ifndef PSX_TRIANGLE_SORT_OFF
+                // Only use per-triangle center depth for transparent objects (painter's algorithm).
+                // Opaque objects must write hardware depth; the center-depth trick pushes triangle
+                // edges "behind" the actual surface, letting background geometry bleed through as
+                // a hairline seam that grows with distance (the farther the camera, the larger the
+                // screen-space gap between edge depth and triangle-center depth).
+                #ifdef _TRANSPARENT
                 o.depth = i.customDepth;
+                #else
+                o.depth = i.vertex.z;
+                #endif
                 return o;
                 #else
                 return o.color;
