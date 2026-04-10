@@ -1,7 +1,7 @@
 # PSX Enhanced URP Shader
 
-I got tired of all the old an semi-fucntional PSX shaderkits and render pipelines so I made one that as of now works with Unity 6.4.1's URP
-A PSX/PS1-style vertex-lit shader for Unity 6 URP. Bakes all PSX 
+I got tired of all the old an semi-fucntional PSX shaderkits and render pipelines so I made one that as of now works with Unity 6.4.1's URP.
+This is A PSX/PS1-style vertex-lit shader for Unity 6 URP. Bakes all PSX 
 post-process effects (dithering, quantization, pixelation, vertex 
 snapping, affine texture warping) directly in-shader.
 
